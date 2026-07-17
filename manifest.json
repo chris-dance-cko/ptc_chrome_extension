@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "Extension",
+  "version": "1.0",
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "scripting",
+    "storage",
+    "bookmarks",
+    "history",
+    "downloads",
+    "alarms",
+    "notifications",
+    "contextMenus",
+    "clipboardWrite",
+    "clipboardRead",
+    "unlimitedStorage",
+    "offscreen",
+    "declarativeNetRequest",
+    "sidePanel",
+    "tabGroups"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Click to open side panel"
+  },
+  "commands": {
+    "bookmark-spotlight": {
+      "suggested_key": {
+        "default": "Ctrl+B",
+        "mac": "Command+B"
+      },
+      "description": "Open bookmark spotlight"
+    }
+  }
+}
