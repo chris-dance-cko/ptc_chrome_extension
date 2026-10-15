@@ -3,325 +3,6 @@ chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch((error) => console.error(error));
 
-// ── QA Lambda Version ────────────────────────────────────────────────────────
-// Periodically checks which version of one specific lambda pipeline is
-// currently deployed to QA and surfaces it in the side panel.
-
-const QA_BASE_URL = 'https://app.harness.io';
-const QA_TARGET = {
-  accountIdentifier: 'x9vTEK0gRkadO7XKkBzdTw',
-  organizationIdentifier: 'pay_to_card',
-  projectIdentifier: 'pay_to_card_services',
-  pipelineIdentifier: 'ptc_payout_authorize_v2_pipeline',
-  // Master builds are bare semver (e.g. "1.853.0"). Branch builds embed the
-  // branch name in the version (e.g. "1.853.0-unstable-improvement-<branchName>.commit1").
-  // Set this to whichever branch this lambda's QA env deploys from.
-  branchName: 'auto-deploy-qa',
-};
-
-const QA_HISTORY_DAYS = 180;
-const QA_MAX_PAGES = 10;
-const QA_PAGE_SIZE = 25;
-const QA_ENV_RE = /^qa$/i;
-const QA_SEMVER_PREFIX_RE = /^\d+\.\d+\.\d+/;
-const QA_ALARM_NAME = 'hrv-qa-poll';
-const QA_POLL_MINUTES = 5;
-const QA_STORAGE_KEY = 'hrvQaStatus';
-
-const qaEscapeRe = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const qaBranchNameRe = (branchName) => new RegExp(qaEscapeRe(branchName), 'i');
-
-// "1.853.0-unstable-improvement-auto-deploy-qa.commit1" -> "1.853.0 auto-deploy-qa"
-function qaFormatDisplayVersion(version, branchName) {
-  const semverMatch = QA_SEMVER_PREFIX_RE.exec(version);
-  if (!semverMatch || !qaBranchNameRe(branchName).test(version)) return version;
-  return `${semverMatch[0]} ${branchName}`;
-}
-
-function qaBuildQuery(params) {
-  return Object.entries(params)
-    .filter(([, v]) => v != null && v !== '')
-    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
-    .join('&');
-}
-
-async function qaApiGet(path, params) {
-  const res = await fetch(`${QA_BASE_URL}${path}?${qaBuildQuery(params)}`, {
-    credentials: 'include',
-    headers: { Accept: 'application/json' },
-  });
-  if (!res.ok) throw new Error(`API error ${res.status} on ${path}`);
-  return res.json();
-}
-
-async function qaApiPost(path, params, body) {
-  const res = await fetch(`${QA_BASE_URL}${path}?${qaBuildQuery(params)}`, {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`API error ${res.status} on ${path}`);
-  return res.json();
-}
-
-const QA_HARNESS_EXPR_RE = /^<\+.+>$/;
-const QA_RELEASE_VERSION_RE = /release_version\s*[:=]\s*["']?(?<ver>[^"'\r\n]+?)["']?(?:\s|$)/i;
-const QA_VAR_NAME_RE = /^(?<indent>\s*)-\s*name\s*:\s*["']?(?<name>[^"'\r\n]+)["']?\s*$/i;
-const QA_VAR_VALUE_RE = /^\s*value\s*:\s*["']?(?<ver>[^"'\r\n]+)["']?\s*$/i;
-const QA_YAML_FIELDS = ['inputSetYaml', 'resolvedYaml', 'inputSetTemplateYaml', 'inputYaml', 'pipelineYaml', 'executionYaml', 'input'];
-
-function qaIsConcrete(v) {
-  return typeof v === 'string' && v.trim() !== '' && !QA_HARNESS_EXPR_RE.test(v.trim());
-}
-
-function qaDeepFindString(obj, name) {
-  if (!obj || typeof obj !== 'object') return '';
-  if (Array.isArray(obj)) {
-    for (const item of obj) { const r = qaDeepFindString(item, name); if (r) return r; }
-    return '';
-  }
-  for (const [key, value] of Object.entries(obj)) {
-    if (key === name && typeof value === 'string' && value.trim()) return value;
-    if (value && typeof value === 'object') { const r = qaDeepFindString(value, name); if (r) return r; }
-  }
-  return '';
-}
-
-function qaFindVersionInYaml(yaml) {
-  if (!yaml) return '';
-  const m = QA_RELEASE_VERSION_RE.exec(yaml);
-  if (m && qaIsConcrete(m.groups.ver)) return m.groups.ver.trim();
-  const lines = yaml.split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    const nm = QA_VAR_NAME_RE.exec(lines[i]);
-    if (!nm || nm.groups.name.trim().toLowerCase() !== 'release_version') continue;
-    const indent = nm.groups.indent.length;
-    for (let j = i + 1; j < lines.length; j++) {
-      const nm2 = QA_VAR_NAME_RE.exec(lines[j]);
-      if (nm2 && nm2.groups.indent.length <= indent) break;
-      const vm = QA_VAR_VALUE_RE.exec(lines[j]);
-      if (vm && vm.groups.ver.trim()) return vm.groups.ver.trim();
-    }
-  }
-  return '';
-}
-
-function qaFindReleaseVersion(execution) {
-  const direct = qaDeepFindString(execution, 'release_version');
-  if (qaIsConcrete(direct)) return direct;
-  for (const field of QA_YAML_FIELDS) {
-    const v = qaFindVersionInYaml(qaDeepFindString(execution, field));
-    if (qaIsConcrete(v)) return v;
-  }
-  return '';
-}
-
-const QA_TIME_KEYS = ['startTs', 'startTime', 'executionStartTs', 'createdAt'];
-const QA_EXEC_KEYS = ['planExecutionId', 'executionId', 'uuid'];
-
-function qaFirstString(obj, keys) {
-  for (const k of keys) { if (obj && typeof obj[k] === 'string' && obj[k].trim()) return obj[k].trim(); }
-  return '';
-}
-
-function qaBuildExecUrl(info, execId) {
-  return `${QA_BASE_URL}/ng/account/${encodeURIComponent(info.accountIdentifier)}/all/orgs/${encodeURIComponent(info.organizationIdentifier)}/projects/${encodeURIComponent(info.projectIdentifier)}/pipelines/${encodeURIComponent(info.pipelineIdentifier)}/deployments/${encodeURIComponent(execId)}/pipeline`;
-}
-
-async function qaFetchPipelineDefinition(info) {
-  return qaApiGet(`/pipeline/api/pipelines/${encodeURIComponent(info.pipelineIdentifier)}`, {
-    accountIdentifier: info.accountIdentifier,
-    orgIdentifier: info.organizationIdentifier,
-    projectIdentifier: info.projectIdentifier,
-    getTemplatesResolvedPipeline: 'true',
-  });
-}
-
-const QA_STAGE_START_RE = /^(\s*)-\s*stage\s*:\s*$/;
-const QA_YAML_KV_RE = /^(\s*)(?:-\s+)?([A-Za-z_][\w-]*)\s*:\s*(?:["']?([^"'\r\n]+?)["']?)?\s*$/;
-const QA_NON_EMPTY_RE = /^(\s*)\S/;
-
-function qaExtractStagesFromYaml(yaml) {
-  if (!yaml) return [];
-  const lines = yaml.split(/\r?\n/);
-  const stages = [];
-  let current = null;
-  let stageBlockIndent = -1;
-
-  for (const line of lines) {
-    const stageStart = QA_STAGE_START_RE.exec(line);
-    if (stageStart) {
-      stageBlockIndent = stageStart[1].length;
-      current = { name: '', identifier: '', environmentRef: '', environment: '' };
-      stages.push(current);
-      continue;
-    }
-    if (!current) continue;
-
-    const leading = QA_NON_EMPTY_RE.exec(line);
-    if (leading && leading[1].length <= stageBlockIndent) { current = null; continue; }
-
-    const kv = QA_YAML_KV_RE.exec(line);
-    if (!kv) continue;
-    const [, , key, value] = kv;
-    if (!value) continue;
-    if (key === 'name' && !current.name) current.name = value.trim();
-    else if (key === 'identifier' && !current.identifier) current.identifier = value.trim();
-    else if (key === 'environmentRef' && !current.environmentRef) {
-      current.environmentRef = value.trim();
-      const parts = current.environmentRef.split('.');
-      current.environment = parts[parts.length - 1];
-    }
-  }
-  return stages;
-}
-
-function qaBuildStageIdToEnv(stages) {
-  const stageIdToEnv = {};
-  for (const s of stages) {
-    if (s.environment && s.identifier) stageIdToEnv[s.identifier.toLowerCase()] = s.environment;
-  }
-  return stageIdToEnv;
-}
-
-function qaIsSuccessful(status) {
-  const s = (status || '').toLowerCase();
-  return s === 'succeeded' || s === 'success';
-}
-
-async function qaFetchExecutionPage(info, page, timeRange) {
-  return qaApiPost(
-    '/pipeline/api/pipelines/execution/summary',
-    {
-      accountIdentifier: info.accountIdentifier,
-      orgIdentifier: info.organizationIdentifier,
-      projectIdentifier: info.projectIdentifier,
-      pipelineIdentifier: info.pipelineIdentifier,
-      page,
-      size: QA_PAGE_SIZE,
-    },
-    { filterType: 'PipelineExecution', timeRange },
-  );
-}
-
-async function qaFetchInputSet(info, planExecutionId) {
-  try {
-    return await qaApiGet(
-      `/pipeline/api/pipelines/execution/${encodeURIComponent(planExecutionId)}/inputsetV2`,
-      {
-        accountIdentifier: info.accountIdentifier,
-        orgIdentifier: info.organizationIdentifier,
-        projectIdentifier: info.projectIdentifier,
-        resolveExpressions: 'true',
-        resolveExpressionsType: 'RESOLVE_ALL_EXPRESSIONS',
-      },
-    );
-  } catch {
-    return null;
-  }
-}
-
-// Finds the QA stage's identifier from pipeline YAML, then walks execution
-// history newest-first until it finds the latest successful deploy to it
-// whose version was cut from info.branchName.
-async function qaFetchQaVersion(info) {
-  const pipelineResp = await qaFetchPipelineDefinition(info);
-  const yaml = pipelineResp?.data?.resolvedTemplatesPipelineYaml
-    || pipelineResp?.data?.yamlPipeline
-    || '';
-  const stages = qaExtractStagesFromYaml(yaml);
-  const stageIdToEnv = qaBuildStageIdToEnv(stages);
-  const qaStageIds = Object.entries(stageIdToEnv)
-    .filter(([, env]) => QA_ENV_RE.test(env))
-    .map(([id]) => id);
-  if (qaStageIds.length === 0) return { found: false, reason: 'No QA stage found for this pipeline.' };
-
-  const now = Date.now();
-  const timeRange = { startTime: now - QA_HISTORY_DAYS * 24 * 60 * 60 * 1000, endTime: now };
-
-  for (let page = 0; page < QA_MAX_PAGES; page++) {
-    const resp = await qaFetchExecutionPage(info, page, timeRange);
-    const executions = resp?.data?.content ?? (Array.isArray(resp?.data) ? resp.data : []);
-    if (executions.length === 0) break;
-
-    for (const exec of executions) {
-      const layoutNodeMap = exec?.layoutNodeMap ?? {};
-      const qaNode = Object.values(layoutNodeMap).find((node) => {
-        if (node?.nodeGroup !== 'STAGE' && node?.nodeGroup !== 'STRATEGY') return false;
-        return qaStageIds.includes((node.nodeIdentifier || '').toLowerCase()) && qaIsSuccessful(node.status);
-      });
-      if (!qaNode) continue;
-
-      const execId = qaFirstString(exec, QA_EXEC_KEYS);
-      let version = qaFindReleaseVersion(exec);
-      if (!qaIsConcrete(version) && execId) {
-        const inputSet = await qaFetchInputSet(info, execId);
-        if (inputSet) version = qaFindReleaseVersion({ ...exec, _inputSet: inputSet });
-      }
-      if (!qaIsConcrete(version)) continue;
-      if (!qaBranchNameRe(info.branchName).test(version)) continue;
-
-      return {
-        found: true,
-        version,
-        executionUrl: execId ? qaBuildExecUrl(info, execId) : '',
-      };
-    }
-
-    if (executions.length < QA_PAGE_SIZE) break;
-  }
-
-  return { found: false, reason: `No successful "${info.branchName}" deployment found in the last 180 days.` };
-}
-
-async function qaRefresh() {
-  try {
-    const result = await qaFetchQaVersion(QA_TARGET);
-    const status = result.found
-      ? {
-          state: 'ok',
-          version: qaFormatDisplayVersion(result.version, QA_TARGET.branchName),
-          rawVersion: result.version,
-          executionUrl: result.executionUrl,
-          updatedAt: Date.now(),
-        }
-      : { state: 'empty', reason: result.reason, updatedAt: Date.now() };
-    await chrome.storage.local.set({ [QA_STORAGE_KEY]: status });
-  } catch (err) {
-    const status = { state: 'error', message: err instanceof Error ? err.message : String(err), updatedAt: Date.now() };
-    await chrome.storage.local.set({ [QA_STORAGE_KEY]: status });
-  }
-}
-
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.alarms.create(QA_ALARM_NAME, { periodInMinutes: QA_POLL_MINUTES });
-  qaRefresh();
-});
-
-chrome.runtime.onStartup.addListener(() => {
-  qaRefresh();
-});
-
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === QA_ALARM_NAME) qaRefresh();
-});
-
-chrome.storage.local.get(QA_STORAGE_KEY).then((data) => {
-  if (!data[QA_STORAGE_KEY]) qaRefresh();
-});
-
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === 'hrv:refresh-qa') {
-    qaRefresh().then(() => sendResponse({ ok: true }));
-    return true;
-  }
-});
-
-// ── End QA Lambda Version ────────────────────────────────────────────────────
-
-
-
 // Cache the bookmarks bar ID so we don't look it up on every event
 let bookmarksBarId = null;
 
@@ -375,78 +56,6 @@ chrome.bookmarks.onRemoved.addListener((id) => {
   pendingBookmarks.delete(id);
 });
 
-
-// ── Bookmark Spotlight ──────────────────────────────────────────────────────
-
-chrome.commands.onCommand.addListener(async (command) => {
-  if (command !== 'bookmark-spotlight') return;
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) return;
-  try {
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['spotlight.js'] });
-  } catch (e) {
-    console.error('Spotlight injection error:', e);
-  }
-});
-
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'BOOKMARK_SEARCH') {
-    handleBookmarkSearch(message.query).then(sendResponse);
-    return true;
-  }
-  if (message.type === 'BOOKMARK_OPEN') {
-    handleBookmarkOpen(message.bookmarkId, sender.tab.id);
-    sendResponse({ success: true });
-  }
-});
-
-async function handleBookmarkSearch(query) {
-  const tree = await chrome.bookmarks.getTree();
-  const lowerQuery = query.toLowerCase();
-  const results = [];
-
-  function traverse(node) {
-    if (node.url) {
-      const titleMatch = node.title.toLowerCase().includes(lowerQuery);
-      const urlMatch = node.url.toLowerCase().includes(lowerQuery);
-      if (titleMatch || urlMatch) results.push({ id: node.id, title: node.title, url: node.url, titleMatch });
-    }
-    node.children?.forEach(traverse);
-  }
-  traverse(tree[0]);
-
-  const { bookmarkHistory = [] } = await chrome.storage.local.get('bookmarkHistory');
-  const histMap = new Map(bookmarkHistory.map(h => [h.id, h]));
-
-  results.sort((a, b) => {
-    if (a.titleMatch && !b.titleMatch) return -1;
-    if (!a.titleMatch && b.titleMatch) return 1;
-    const aC = histMap.get(a.id)?.count || 0, bC = histMap.get(b.id)?.count || 0;
-    if (aC !== bC) return bC - aC;
-    const aT = histMap.get(a.id)?.lastOpened || 0, bT = histMap.get(b.id)?.lastOpened || 0;
-    if (aT !== bT) return bT - aT;
-    return a.title.localeCompare(b.title);
-  });
-
-  return results.slice(0, 20);
-}
-
-async function handleBookmarkOpen(bookmarkId, tabId) {
-  const [bookmark] = await chrome.bookmarks.get(bookmarkId);
-  if (!bookmark?.url) return;
-
-  const { bookmarkHistory = [] } = await chrome.storage.local.get('bookmarkHistory');
-  const existing = bookmarkHistory.find(h => h.id === bookmarkId);
-  if (existing) {
-    existing.count++;
-    existing.lastOpened = Date.now();
-  } else {
-    bookmarkHistory.push({ id: bookmarkId, title: bookmark.title, url: bookmark.url, count: 1, lastOpened: Date.now() });
-  }
-  await chrome.storage.local.set({ bookmarkHistory });
-
-  chrome.tabs.update(tabId, { url: bookmark.url });
-}
 
 // ── Auto Tab Grouping ────────────────────────────────────────────────────────
 // Rules are configured in the side panel and stored as:
@@ -713,6 +322,129 @@ async function moveOtherGroupToEnd(windowId) {
     }
   });
 }
+
+// ── Auto-Close Tabs ──────────────────────────────────────────────────────────
+// Rules are configured in the side panel and stored as:
+//   { id, pattern, delaySeconds, enabled }
+// Matching is a case-insensitive substring test against the tab's URL, same
+// as tab grouping. A matching tab is timestamped when it's first seen (or
+// first starts matching); a recurring alarm then closes any tracked tab once
+// its rule's delay has elapsed.
+
+const AUTO_CLOSE_RULES_KEY = 'autoCloseRules';
+const AUTO_CLOSE_TRACKING_KEY = 'autoCloseTracking';
+const AUTO_CLOSE_ALARM_NAME = 'auto-close-check';
+const AUTO_CLOSE_CHECK_MINUTES = 0.5; // 30 seconds
+
+async function getAutoCloseRules() {
+  const { [AUTO_CLOSE_RULES_KEY]: rules = [] } = await chrome.storage.sync.get(AUTO_CLOSE_RULES_KEY);
+  return rules;
+}
+
+function matchAutoCloseRule(url, rules) {
+  if (!url) return null;
+  const lowerUrl = url.toLowerCase();
+  return rules.find(r => r.enabled !== false && r.pattern && lowerUrl.includes(r.pattern.toLowerCase())) || null;
+}
+
+// Session storage survives service worker restarts but clears on browser
+// restart, which is fine — tabs from a previous session are gone too.
+async function getAutoCloseTracking() {
+  const { [AUTO_CLOSE_TRACKING_KEY]: tracking = {} } = await chrome.storage.session.get(AUTO_CLOSE_TRACKING_KEY);
+  return tracking;
+}
+
+async function setAutoCloseTracking(tracking) {
+  await chrome.storage.session.set({ [AUTO_CLOSE_TRACKING_KEY]: tracking });
+}
+
+// Called on tab creation and on URL changes. Starts tracking a tab against
+// whichever rule (if any) currently matches its URL, resetting the timer if
+// the matching rule changed, and untracks it if nothing matches anymore.
+async function trackTabForAutoClose(tab) {
+  if (!tab?.id || !tab.url) return;
+
+  const rules = await getAutoCloseRules();
+  const rule = matchAutoCloseRule(tab.url, rules);
+  const tracking = await getAutoCloseTracking();
+  const key = String(tab.id);
+  const existing = tracking[key];
+
+  if (!rule) {
+    if (existing) {
+      delete tracking[key];
+      await setAutoCloseTracking(tracking);
+    }
+    return;
+  }
+
+  if (existing && existing.ruleId === rule.id) return; // already tracked for this rule
+
+  tracking[key] = { ruleId: rule.id, addedAt: Date.now() };
+  await setAutoCloseTracking(tracking);
+}
+
+async function untrackTabForAutoClose(tabId) {
+  const tracking = await getAutoCloseTracking();
+  const key = String(tabId);
+  if (!(key in tracking)) return;
+  delete tracking[key];
+  await setAutoCloseTracking(tracking);
+}
+
+async function checkAutoCloseTabs() {
+  const tracking = await getAutoCloseTracking();
+  const keys = Object.keys(tracking);
+  if (keys.length === 0) return;
+
+  const rules = await getAutoCloseRules();
+  const rulesById = new Map(rules.map((r) => [r.id, r]));
+  const now = Date.now();
+  let changed = false;
+
+  for (const key of keys) {
+    const entry = tracking[key];
+    const rule = rulesById.get(entry.ruleId);
+    // Rule was deleted or disabled since — stop tracking without closing.
+    if (!rule || rule.enabled === false) {
+      delete tracking[key];
+      changed = true;
+      continue;
+    }
+    if (now - entry.addedAt < rule.delaySeconds * 1000) continue;
+
+    delete tracking[key];
+    changed = true;
+    try {
+      await chrome.tabs.remove(Number(key));
+    } catch {
+      // Tab already closed; nothing to do.
+    }
+  }
+
+  if (changed) await setAutoCloseTracking(tracking);
+}
+
+chrome.tabs.onCreated.addListener((tab) => {
+  trackTabForAutoClose(tab);
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.url) trackTabForAutoClose(tab);
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  untrackTabForAutoClose(tabId);
+});
+
+chrome.alarms.create(AUTO_CLOSE_ALARM_NAME, { periodInMinutes: AUTO_CLOSE_CHECK_MINUTES });
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === AUTO_CLOSE_ALARM_NAME) checkAutoCloseTabs();
+});
+
+// ── End Auto-Close Tabs ──────────────────────────────────────────────────────
+
 
 async function mergeGroupsByName(windowId) {
   await withGroupingLock(`merge:${windowId}`, async () => {

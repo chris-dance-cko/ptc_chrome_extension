@@ -4,20 +4,9 @@
   "version": "1.0",
   "permissions": [
     "tabs",
-    "activeTab",
-    "scripting",
     "storage",
     "bookmarks",
-    "history",
-    "downloads",
     "alarms",
-    "notifications",
-    "contextMenus",
-    "clipboardWrite",
-    "clipboardRead",
-    "unlimitedStorage",
-    "offscreen",
-    "declarativeNetRequest",
     "sidePanel",
     "tabGroups"
   ],
@@ -33,14 +22,5 @@
   },
   "action": {
     "default_title": "Click to open side panel"
-  },
-  "commands": {
-    "bookmark-spotlight": {
-      "suggested_key": {
-        "default": "Ctrl+B",
-        "mac": "Command+B"
-      },
-      "description": "Open bookmark spotlight"
-    }
   }
 }

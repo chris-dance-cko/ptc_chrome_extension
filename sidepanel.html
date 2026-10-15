@@ -69,18 +69,6 @@
       transform: scale(0.99);
     }
 
-    button.active {
-      background: var(--accent);
-      color: #fff;
-      border-color: var(--accent);
-    }
-
-    button.active:hover {
-      background: var(--accent-hover);
-      border-color: var(--accent-hover);
-    }
-
-    #lassoStatus,
     #dlqStatus {
       font-size: 11px;
       color: var(--muted);
@@ -90,43 +78,6 @@
 
     #dlqResults {
       margin-bottom: 10px;
-    }
-
-    #qaBox {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 8px 10px;
-      margin-bottom: 10px;
-    }
-
-    #qaLabel {
-      font-size: 10px;
-      color: var(--muted);
-      margin-bottom: 3px;
-      word-break: break-all;
-    }
-
-    #qaVersion {
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 13px;
-      font-weight: 600;
-      word-break: break-all;
-    }
-
-    #qaVersion a {
-      color: var(--accent);
-      text-decoration: none;
-    }
-
-    #qaVersion a:hover {
-      text-decoration: underline;
-    }
-
-    #qaUpdated {
-      font-size: 10px;
-      color: var(--muted);
-      margin-top: 4px;
     }
 
     .dlq-item {
@@ -180,32 +131,15 @@
       box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
     }
 
-    #log {
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 11px;
-      line-height: 1.5;
-      color: var(--muted);
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 10px 12px;
-      height: 200px;
-      overflow-y: auto;
-    }
-
-    #promptsPanel,
-    #tabGroupsPanel {
+    #tabGroupsPanel,
+    #autoClosePanel {
       display: none;
       margin-bottom: 10px;
     }
 
-    #promptsPanel.open,
-    #tabGroupsPanel.open {
+    #tabGroupsPanel.open,
+    #autoClosePanel.open {
       display: block;
-    }
-
-    #promptList {
-      margin-bottom: 8px;
     }
 
     .prompt-item {
@@ -280,65 +214,35 @@
       font-size: 11px;
     }
 
-    .prompt-item textarea {
-      margin-top: 4px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      resize: vertical;
-      min-height: 50px;
-    }
-
-    #addPromptForm {
-      border-top: 1px solid var(--border);
-      padding-top: 10px;
-    }
-
-    #addPromptForm input[type="text"],
-    #addPromptForm textarea,
     #addTabGroupForm input[type="text"],
-    #addTabGroupForm select {
+    #addTabGroupForm select,
+    #addAutoCloseForm input[type="text"] {
       margin-bottom: 6px;
     }
 
-    #addPromptForm textarea {
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      min-height: 70px;
-      resize: vertical;
-    }
-
-    #addPromptForm button,
-    #addTabGroupForm button {
+    #addTabGroupForm button,
+    #addAutoCloseForm button {
       width: auto;
       display: inline-block;
       padding: 7px 16px;
       margin-bottom: 0;
     }
+
+    .auto-close-item-meta {
+      font-size: 10px;
+      color: var(--muted);
+      margin-top: 3px;
+    }
   </style>
 </head>
 
 <body>
-  <h3 style="margin: 0 0 6px;">QA Version</h3>
-  <div id="qaBox">
-    <div id="qaLabel">ptc_payout_authorize_v2_pipeline</div>
-    <div id="qaVersion">Loading&hellip;</div>
-    <div id="qaUpdated"></div>
-  </div>
-  <button id="qaRefresh">Refresh</button>
-  <hr>
-  <button id="refreshAll">Refresh All Tabs</button>
-  <button id="scrapeTitles">Log All Tab Titles</button>
-  <!-- <button id="clearStorage">Clear Local Data</button> -->
-  <button id="harnessOpen">Open Recent Harness Executions</button>
-  <hr>
-  <h3 style="margin: 10px 0 6px;">Retool PTC DLQ → Datadog</h3>
+  <h3 style="margin: 0 0 6px;">Retool PTC DLQ → Datadog</h3>
   <textarea id="dlqPaste" placeholder="Paste the Retool DLQ response JSON here…"
     style="min-height:80px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; margin-bottom:8px; resize:vertical;"></textarea>
   <button id="dlqParse">Parse JSON → Datadog Links</button>
   <div id="dlqStatus"></div>
   <div id="dlqResults"></div>
-  <hr>
-  <h3 style="margin: 10px 0 6px;">LLM Lasso</h3>
-  <button id="lassoToggle">Select Element</button>
-  <div id="lassoStatus"></div>
   <hr>
   <h3 style="margin: 10px 0 6px;">Tab Grouping</h3>
   <button id="tabGroupsToggle">Show Tab Groups</button>
@@ -362,19 +266,16 @@
     </div>
   </div>
   <hr>
-  <h3 style="margin: 10px 0 6px;">Prompts</h3>
-  <button id="promptsToggle">Show Prompts</button>
-  <div id="promptsPanel">
-    <div id="promptList"></div>
-    <div id="addPromptForm">
-      <input type="text" id="newPromptName" placeholder="Name">
-      <textarea id="newPromptText" placeholder="Prompt text…"></textarea>
-      <button id="savePrompt">Save</button>
+  <h3 style="margin: 10px 0 6px;">Auto-Close Tabs</h3>
+  <button id="autoCloseToggle">Show Auto-Close Rules</button>
+  <div id="autoClosePanel">
+    <div id="autoCloseList"></div>
+    <div id="addAutoCloseForm">
+      <input type="text" id="newCloseRulePattern" placeholder="URL contains… (e.g. example.com/checkout)">
+      <input type="text" id="newCloseRuleDelay" placeholder="Close after seconds… (e.g. 300)">
+      <button id="addAutoCloseRule">Add Rule</button>
     </div>
   </div>
-  <hr>
-  <div id="log">Logs will appear here...</div>
-  <script src="turndown.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 

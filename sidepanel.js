@@ -1,142 +1,3 @@
-const logDiv = document.getElementById('log');
-
-// ── QA Lambda Version ────────────────────────────────────────────────────────
-
-const QA_STORAGE_KEY = 'hrvQaStatus';
-
-function renderQaStatus(status) {
-  const versionEl = document.getElementById('qaVersion');
-  const updatedEl = document.getElementById('qaUpdated');
-
-  if (!status) {
-    versionEl.textContent = 'No data yet.';
-    updatedEl.textContent = '';
-    return;
-  }
-
-  if (status.state === 'ok') {
-    versionEl.innerHTML = status.executionUrl
-      ? `<a href="${status.executionUrl}" target="_blank" rel="noopener noreferrer">${status.version}</a>`
-      : status.version;
-  } else if (status.state === 'error') {
-    versionEl.textContent = `Error: ${status.message}`;
-  } else {
-    versionEl.textContent = status.reason || 'No QA deployment found.';
-  }
-
-  updatedEl.textContent = status.updatedAt
-    ? `Updated ${new Date(status.updatedAt).toLocaleTimeString()}`
-    : '';
-}
-
-chrome.storage.local.get(QA_STORAGE_KEY).then((data) => renderQaStatus(data[QA_STORAGE_KEY]));
-
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && changes[QA_STORAGE_KEY]) renderQaStatus(changes[QA_STORAGE_KEY].newValue);
-});
-
-document.getElementById('qaRefresh').addEventListener('click', async () => {
-  const btn = document.getElementById('qaRefresh');
-  btn.disabled = true;
-  btn.textContent = 'Refreshing…';
-  await chrome.runtime.sendMessage({ type: 'hrv:refresh-qa' });
-  btn.disabled = false;
-  btn.textContent = 'Refresh';
-});
-
-// ── End QA Lambda Version ────────────────────────────────────────────────────
-
-// ── Prompts ──────────────────────────────────────────────────────────────────
-
-const PROMPTS_KEY = 'saved_prompts';
-
-function loadPrompts() {
-  try { return JSON.parse(localStorage.getItem(PROMPTS_KEY)) || []; }
-  catch { return []; }
-}
-
-function savePrompts(prompts) {
-  localStorage.setItem(PROMPTS_KEY, JSON.stringify(prompts));
-}
-
-function renderPrompts() {
-  const list = document.getElementById('promptList');
-  list.innerHTML = '';
-  const prompts = loadPrompts();
-  prompts.forEach((p, i) => {
-    const item = document.createElement('div');
-    item.className = 'prompt-item';
-
-    const header = document.createElement('div');
-    header.className = 'prompt-item-header';
-
-    const name = document.createElement('div');
-    name.className = 'prompt-item-name';
-    name.textContent = p.name || `Prompt ${i + 1}`;
-
-    const actions = document.createElement('div');
-    actions.className = 'prompt-item-actions';
-
-    const copyBtn = document.createElement('button');
-    copyBtn.textContent = 'Copy';
-    copyBtn.addEventListener('click', () => {
-      navigator.clipboard.writeText(p.text).then(() => {
-        copyBtn.textContent = 'Copied!';
-        setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
-      });
-    });
-
-    const delBtn = document.createElement('button');
-    delBtn.textContent = 'Delete';
-    delBtn.addEventListener('click', () => {
-      const all = loadPrompts();
-      all.splice(i, 1);
-      savePrompts(all);
-      renderPrompts();
-    });
-
-    actions.appendChild(copyBtn);
-    actions.appendChild(delBtn);
-    header.appendChild(name);
-    header.appendChild(actions);
-
-    const ta = document.createElement('textarea');
-    ta.value = p.text;
-    ta.addEventListener('change', () => {
-      const all = loadPrompts();
-      all[i].text = ta.value;
-      savePrompts(all);
-    });
-
-    item.appendChild(header);
-    item.appendChild(ta);
-    list.appendChild(item);
-  });
-}
-
-document.getElementById('promptsToggle').addEventListener('click', () => {
-  const panel = document.getElementById('promptsPanel');
-  const btn = document.getElementById('promptsToggle');
-  const open = panel.classList.toggle('open');
-  btn.textContent = open ? 'Hide Prompts' : 'Show Prompts';
-  if (open) renderPrompts();
-});
-
-document.getElementById('savePrompt').addEventListener('click', () => {
-  const name = document.getElementById('newPromptName').value.trim();
-  const text = document.getElementById('newPromptText').value;
-  if (!text) return;
-  const prompts = loadPrompts();
-  prompts.push({ name: name || `Prompt ${prompts.length + 1}`, text });
-  savePrompts(prompts);
-  document.getElementById('newPromptName').value = '';
-  document.getElementById('newPromptText').value = '';
-  renderPrompts();
-});
-
-// ── End Prompts ──────────────────────────────────────────────────────────────
-
-
 // ── Tab Grouping ─────────────────────────────────────────────────────────────
 
 const TAB_GROUP_RULES_KEY = 'tabGroupRules';
@@ -292,70 +153,106 @@ document.getElementById('addTabGroupRule').addEventListener('click', async () =>
 // ── End Tab Grouping ─────────────────────────────────────────────────────────
 
 
-// ── LLM Lasso ──────────────────────────────────────────────────────────────
+// ── Auto-Close Tabs ──────────────────────────────────────────────────────────
+// Rules are matched (case-insensitive substring against the tab's URL) and
+// enforced by background.js, which timestamps matching tabs on open/navigate
+// and closes them once their rule's delay has elapsed.
 
-const lassoBtn = document.getElementById('lassoToggle');
-const lassoStatus = document.getElementById('lassoStatus');
-let lassoArmed = false;
+const AUTO_CLOSE_RULES_KEY = 'autoCloseRules';
 
-async function armLasso() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) {
-    lassoStatus.textContent = 'No active tab.';
-    return;
-  }
-  try {
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['turndown.js', 'lasso.js'] });
-    lassoArmed = true;
-    lassoBtn.classList.add('active');
-    lassoBtn.textContent = 'Cancel';
-    lassoStatus.textContent = 'Hover over an element and click to capture.';
-  } catch (e) {
-    lassoStatus.textContent = `Error: ${e.message}`;
-  }
+async function loadAutoCloseRules() {
+  const { [AUTO_CLOSE_RULES_KEY]: rules = [] } = await chrome.storage.sync.get(AUTO_CLOSE_RULES_KEY);
+  return rules;
 }
 
-async function disarmLasso() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab?.id) {
-    // Tell the injected script to clean up
-    chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: () => { if (typeof window.__lassoCleanup === 'function') window.__lassoCleanup(); }
-    }).catch(() => {});
-  }
-  lassoArmed = false;
-  lassoBtn.classList.remove('active');
-  lassoBtn.textContent = 'Select Element';
+async function saveAutoCloseRules(rules) {
+  await chrome.storage.sync.set({ [AUTO_CLOSE_RULES_KEY]: rules });
 }
 
-lassoBtn.addEventListener('click', () => {
-  if (lassoArmed) {
-    disarmLasso();
-    lassoStatus.textContent = 'Cancelled.';
-  } else {
-    armLasso();
-  }
+async function renderAutoCloseRules() {
+  const list = document.getElementById('autoCloseList');
+  list.innerHTML = '';
+  const rules = await loadAutoCloseRules();
+
+  rules.forEach((rule, i) => {
+    const item = document.createElement('div');
+    item.className = 'prompt-item';
+    item.style.opacity = rule.enabled === false ? '0.5' : '1';
+
+    const header = document.createElement('div');
+    header.className = 'prompt-item-header';
+
+    const name = document.createElement('div');
+    name.className = 'prompt-item-name';
+    name.textContent = `"${rule.pattern}"`;
+
+    const actions = document.createElement('div');
+    actions.className = 'prompt-item-actions';
+
+    const toggleBtn = document.createElement('button');
+    toggleBtn.textContent = rule.enabled === false ? 'Enable' : 'Disable';
+    toggleBtn.addEventListener('click', async () => {
+      const all = await loadAutoCloseRules();
+      all[i].enabled = all[i].enabled === false;
+      await saveAutoCloseRules(all);
+      renderAutoCloseRules();
+    });
+
+    const delBtn = document.createElement('button');
+    delBtn.textContent = 'Delete';
+    delBtn.addEventListener('click', async () => {
+      const all = await loadAutoCloseRules();
+      all.splice(i, 1);
+      await saveAutoCloseRules(all);
+      renderAutoCloseRules();
+    });
+
+    actions.appendChild(toggleBtn);
+    actions.appendChild(delBtn);
+    header.appendChild(name);
+    header.appendChild(actions);
+
+    const meta = document.createElement('div');
+    meta.className = 'auto-close-item-meta';
+    meta.textContent = `Closes ${rule.delaySeconds}s after a matching tab opens.`;
+
+    item.appendChild(header);
+    item.appendChild(meta);
+    list.appendChild(item);
+  });
+}
+
+document.getElementById('autoCloseToggle').addEventListener('click', () => {
+  const panel = document.getElementById('autoClosePanel');
+  const btn = document.getElementById('autoCloseToggle');
+  const open = panel.classList.toggle('open');
+  btn.textContent = open ? 'Hide Auto-Close Rules' : 'Show Auto-Close Rules';
+  if (open) renderAutoCloseRules();
 });
 
-// Receive result from lasso.js (conversion + copy happen in page context)
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.type === 'LASSO_CAPTURED') {
-    lassoArmed = false;
-    lassoBtn.classList.remove('active');
-    lassoBtn.textContent = 'Select Element';
-    lassoStatus.textContent = `Copied! (${msg.charCount} chars)`;
-    log(`Lasso: copied ${msg.charCount} chars of Markdown.`);
-  } else if (msg.type === 'LASSO_ERROR') {
-    lassoArmed = false;
-    lassoBtn.classList.remove('active');
-    lassoBtn.textContent = 'Select Element';
-    lassoStatus.textContent = `Error: ${msg.message}`;
-  }
+document.getElementById('addAutoCloseRule').addEventListener('click', async () => {
+  const patternInput = document.getElementById('newCloseRulePattern');
+  const delayInput = document.getElementById('newCloseRuleDelay');
+
+  const pattern = patternInput.value.trim();
+  const delaySeconds = parseInt(delayInput.value, 10);
+  if (!pattern || !Number.isFinite(delaySeconds) || delaySeconds <= 0) return;
+
+  const rules = await loadAutoCloseRules();
+  rules.push({
+    id: `close_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    pattern,
+    delaySeconds,
+    enabled: true
+  });
+  await saveAutoCloseRules(rules);
+
+  patternInput.value = '';
+  delayInput.value = '';
+  renderAutoCloseRules();
 });
 
-// ── End LLM Lasso ───────────────────────────────────────────────────────────
-
+// ── End Auto-Close Tabs ──────────────────────────────────────────────────────
 
 // ── Retool PTC DLQ → Datadog ──────────────────────────────────────────────
 
@@ -443,7 +340,6 @@ function renderDlqResults(items) {
   const parts = [`Captured ${rendered} entr${rendered === 1 ? 'y' : 'ies'}.`];
   if (skipped) parts.push(`${skipped} skipped (missing correlation id / timestamp).`);
   dlqStatus.textContent = parts.join(' ');
-  log(`DLQ: ${parts.join(' ')}`);
 }
 
 // Parse a raw Retool DLQ response pasted into the textarea.
@@ -468,99 +364,3 @@ document.getElementById('dlqParse').addEventListener('click', () => {
 });
 
 // ── End Retool PTC DLQ → Datadog ──────────────────────────────────────────
-
-
-function log(msg) {
-  const entry = document.createElement('div');
-  entry.textContent = `> ${msg}`;
-  logDiv.appendChild(entry);
-  logDiv.scrollTop = logDiv.scrollHeight;
-}
-
-// Refresh All Tabs
-document.getElementById('refreshAll').addEventListener('click', async () => {
-  const tabs = await chrome.tabs.query({});
-  tabs.forEach(tab => chrome.tabs.reload(tab.id));
-  log(`Refreshed ${tabs.length} tabs.`);
-});
-
-// Scrape logic across all tabs
-document.getElementById('scrapeTitles').addEventListener('click', async () => {
-  const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
-  
-  for (const tab of tabs) {
-    try {
-      const [{result}] = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: () => document.title
-      });
-      log(`Title: ${result}`);
-    } catch (e) {
-      log(`Error on tab ${tab.id}: ${e.message}`);
-    }
-  }
-});
-document.getElementById('harnessOpen').addEventListener('click', async () => {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-
-  if (!tab.url.includes("harness.io")) {
-    setStatus("Error: Not on a Harness page.");
-    return;
-  }
-  const FILTERED_NAMES = [
- 
-  "ptc-event-broker",
- 
-];
-
-  try {
-    const [{result}] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      args: [FILTERED_NAMES],
-      func: (excludedNames) => {
-        // 1. Find all execution links on the page
-        const allLinks = Array.from(document.querySelectorAll('a[aria-label^="Execution"]'));
-        
-        // 2. Group them by their "Row"
-        // We find the closest 'tr' (table row) or a div that looks like a row
-        const latestByRow = new Map();
-
-        allLinks.forEach(link => {
-          // Harness usually wraps a pipeline in a <tr> or a specific <div> row
-          const row = link.closest('tr') || link.closest('[class*="card"]') || link.parentElement;
-          
-          // Only add the link if we haven't seen this row/container yet
-          // (This assumes the first link found in the DOM for a row is the latest one)
-          if (row && !latestByRow.has(row)) {
-            const rowText = row.innerText.toLowerCase();
-            console.log("Row Text:", rowText);
-            const isExcluded = excludedNames.some(name => 
-              rowText.includes(name.toLowerCase())
-            );
-
-            if (!isExcluded) {
-              latestByRow.set(row, link.href);
-            }
-
-          }
-        });
-
-        // 3. Convert Map values to array and enforce a strict 10-tab limit
-        return Array.from(latestByRow.values()).slice(0, 10);
-      }
-    });
-
-    if (result && result.length > 0) {
-
-      
-      result.forEach(url => {
-        chrome.tabs.create({ url, active: false });
-      });
-      setStatus(`Opened ${result.length} tabs (capped at 10).`);
-    } else {
-      setStatus("No executions found.");
-    }
-  } catch (e) {
-    setStatus(`Error: ${e.message}`);
-  }
-});
